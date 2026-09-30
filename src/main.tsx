@@ -819,6 +819,15 @@ function App() {
                 <dd>{detail.isbn || 'Não informado'}</dd>
               </dl>
               <div className="detail-actions">
+                {detail.uploads?.map((file) => user ? (
+                  <a className="button" key={file.id} href={'/api/uploads/' + file.id + '/download'}>
+                    <Download size={16} /> Baixar PDF enviado
+                  </a>
+                ) : (
+                  <button className="button" key={file.id} onClick={() => setLogin(true)}>
+                    Entrar para baixar PDF
+                  </button>
+                ))}
                 {detail.available ? (
                   detail.sources?.map((s) => (
                     <button
@@ -855,6 +864,7 @@ function App() {
                   <Library size={16} /> Quero ler
                 </button>
               </div>
+              {!!detail.uploads?.length && <p className="source-note">Arquivo enviado pelo usuário · download disponível para contas do sistema.</p>}
               {detail.supplemental_links?.filter((link) => safeUrl(link.url)).map((link) => (
                 <div className="source-note" key={link.url}>
                   <a className="button outline" href={safeUrl(link.url)} target="_blank" rel="noreferrer">

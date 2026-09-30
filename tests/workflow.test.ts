@@ -81,6 +81,22 @@ after(async () => {
   await pool.query(`drop schema ${schema} cascade`);
   await pool.end();
 });
+test('Arquivo enviado exige login e preserva os bytes no download', async () => {
+  const { PDFDocument } = await import('pdf-lib');
+  const doc = await PDFDocument.create(); doc.addPage();
+  const bytes = Buffer.from(await doc.save());
+  const book = await catalog({...mockBook, externalId:'upload-test',title:'Arquivo enviado de teste'});
+  const [file] = await sql('insert into uploaded_files(book_id,filename,sha256,content,pages) values($1,$2,$3,$4,1) returning id', [book.id,'teste.pdf','test-hash',bytes]);
+  assert.equal((await fetch(base+'/uploads/'+file.id+'/download')).status,401);
+  const r = await fetch(base+'/uploads/'+file.id+'/download',{headers:{Cookie:readerCookie}});
+  assert.equal(r.status,200);
+  assert.match(r.headers.get('content-disposition')!,/attachment/);
+  assert.deepEqual(Buffer.from(await r.arrayBuffer()),bytes);
+  const detail = await call('/books/'+book.id);
+  assert.equal(detail.data.available,true);
+  assert.equal(detail.data.uploads[0].id,file.id);
+  assert.equal(detail.data.uploads[0].content,undefined);
+});
 test('Login, sessão HTTP-only, autorização administrativa e CSRF', async () => {
   assert.match(readerCookie, /session=/);
   assert.equal((await call('/admin/overview')).status, 403);

@@ -134,7 +134,7 @@ app.post('/api/logout', auth, async (req, res) => {
   res.json({ ok: true });
 });
 app.get('/api/providers', (_req, res) => res.json(Object.keys(providers)));
-const bookSelect = `select b.*, exists(select 1 from sources s where s.book_id=b.id and s.status='approved') as available from books b`;
+const bookSelect = `select b.*, (exists(select 1 from sources s where s.book_id=b.id and s.status='approved') or exists(select 1 from uploaded_files f where f.book_id=b.id)) as available from books b`;
 app.get('/api/books', async (req, res) => {
   const page = z.coerce.number().int().min(1).max(10000).default(1).parse(req.query.page);
   const q = String(req.query.q || '').slice(0, 200);
@@ -153,7 +153,8 @@ app.get('/api/books/:id', async (req, res) => {
     `select id,origin,evidence_url,license,region,validated_at from sources where book_id=$1 and status='approved'`,
     [id],
   );
-  res.json({ ...b, sources });
+  const uploads = await sql('select id,filename,pages from uploaded_files where book_id=$1', [id]);
+  res.json({ ...b, sources, uploads });
 });
 app.post('/api/search', auth, limiter('search', 60000, 5), async (req, res) => {
   const { query } = z.object({ query: querySchema }).parse(req.body);
@@ -248,6 +249,13 @@ app.put('/api/shelf/:id', auth, async (req, res) => {
     [res.locals.user.id, uuid.parse(req.params.id), d.favorite, d.state],
   );
   res.json({ ok: true });
+});
+app.get('/api/uploads/:id/download', auth, limiter('uploaded-download', 60000, 6), async (req, res) => {
+  const [file] = await sql('select filename,content from uploaded_files where id=$1', [uuid.parse(req.params.id)]);
+  if (!file) return void res.status(404).json({ error: 'Arquivo não encontrado' });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="livro.pdf"; filename*=UTF-8''${encodeURIComponent(file.filename)}`);
+  await streamDownload(res, file.content);
 });
 app.get('/api/download/:id', auth, limiter('download', 60000, 6), async (req, res) => {
   const [s] = await sql(`select * from sources where id=$1 and status='approved'`, [
