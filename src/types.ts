@@ -20,6 +20,7 @@ export type Book = {
   favorite?: boolean;
   state?: 'want' | 'reading' | 'read';
   sources?: Source[];
+  supplemental_links?: { label: string; url: string; description: string }[];
 };
 export type Source = {
   id: string;

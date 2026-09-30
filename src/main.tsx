@@ -855,6 +855,14 @@ function App() {
                   <Library size={16} /> Quero ler
                 </button>
               </div>
+              {detail.supplemental_links?.filter((link) => safeUrl(link.url)).map((link) => (
+                <div className="source-note" key={link.url}>
+                  <a className="button outline" href={safeUrl(link.url)} target="_blank" rel="noreferrer">
+                    <Download size={16} /> {link.label}
+                  </a>
+                  <p>{link.description}</p>
+                </div>
+              ))}
               {detail.sources?.map((s) => (
                 <p className="source-note" key={s.id}>
                   Licença: {s.license} · Região: {s.region} ·{' '}
