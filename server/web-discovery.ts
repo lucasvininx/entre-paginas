@@ -31,10 +31,12 @@ export const institutionalDomains = [
   'meson.press',
 ];
 export type WebLead = { title: string; url: string; description: string };
+export const webProvider = { search: webDiscovery };
 export async function webDiscovery(query: string): Promise<WebLead[]> {
-  if (!process.env.BRAVE_SEARCH_KEY) return [];
+  if (!process.env.BRAVE_SEARCH_KEY)
+    throw new Error('Busca na web aguardando configuração de BRAVE_SEARCH_KEY pelo administrador.');
   const r = await fetch(
-    `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query + ' livro PDF acesso aberto licença')}&count=20`,
+    `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query + ' PDF ebook')}&count=20`,
     {
       headers: { 'X-Subscription-Token': process.env.BRAVE_SEARCH_KEY },
       signal: AbortSignal.timeout(10000),

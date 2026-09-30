@@ -2,6 +2,21 @@ import { sql, transaction } from './db.ts';
 import { catalog, discover } from './providers.ts';
 import { normalize } from './normalize.ts';
 import { safeFetch, validatePdf } from './safe-fetch.ts';
+import { randomUUID } from 'node:crypto';
+import { waitUntil } from '@vercel/functions';
+
+export async function recoverExpiredJobs() {
+  await sql(
+    `update jobs set status=case when attempts<2 then 'queued' else 'failed' end,lease_token=null,lease_until=null where status='running' and (lease_until is null or lease_until<now())`,
+  );
+  await sql(
+    `update requests set status='temporary_error' where status='searching' and not exists(select 1 from jobs where jobs.request_id=requests.id and jobs.status in ('running','queued'))`,
+  );
+}
+export function scheduleWorker() {
+  if (process.env.VERCEL)
+    waitUntil(runOne().catch((e) => console.error('Worker:', (e as Error).message)));
+}
 export async function demand(
   userId: string,
   query: string,
@@ -127,17 +142,28 @@ export async function approve(id: string, admin: string, requestId?: string) {
   });
 }
 export async function runOne() {
+  await recoverExpiredJobs();
   const job = await transaction(async (q) => {
+    const [lock] = await q(
+      `select pg_try_advisory_xact_lock(hashtext(current_schema()),19471) acquired`,
+    );
+    if (!lock.acquired) return;
+    if (
+      (await q(`select id from jobs where status='running' and lease_until>now() limit 1`)).length
+    )
+      return;
     const [j] = await q(
       `select * from jobs where status='queued' order by created_at for update skip locked limit 1`,
     );
-    if (j)
-      await q(`update jobs set status='running',started_at=now(),attempts=attempts+1 where id=$1`, [
-        j.id,
-      ]);
-    return j;
+    if (!j) return;
+    const [claimed] = await q(
+      `update jobs set status='running',started_at=now(),attempts=attempts+1,lease_until=now()+interval '10 minutes',lease_token=$2 where id=$1 returning *`,
+      [j.id, randomUUID()],
+    );
+    return claimed;
   });
   if (!job) return;
+  const deadline = Date.now() + 210000;
   try {
     const [r] = await sql('select * from requests where id=$1', [job.request_id]);
     const result = await discover([r.title || r.query, r.author || ''].join(' '), true);
@@ -153,12 +179,13 @@ export async function runOne() {
         rejected.push({ title: b.title, reason: 'Idioma diferente' });
         continue;
       }
-      if (candidateIds.length >= 8) continue;
+      if (candidateIds.length >= 3 || Date.now() > deadline - 45000) continue;
       const sources = await sql(
         `select id from sources where book_id=$1 and status in ('candidate','rejected','validated')`,
         [book.id],
       );
       for (const s of sources.slice(0, 2)) {
+        if (candidateIds.length >= 3 || Date.now() > deadline - 45000) break;
         await sql('update sources set request_id=$2 where id=$1', [s.id, r.id]);
         await validateSource(s.id);
         candidateIds.push(s.id);
@@ -170,41 +197,46 @@ export async function runOne() {
         ? 'temporary_error'
         : 'not_found';
     await transaction(async (q) => {
+      const [owned] = await q(
+        `select id from jobs where id=$1 and lease_token=$2 and status='running' for update`,
+        [job.id, job.lease_token],
+      );
+      if (!owned) return;
       await q('insert into attempts(request_id,query,providers) values($1,$2,$3)', [
         r.id,
         r.query,
         JSON.stringify(result.providers),
       ]);
       await q("update requests set status=$2 where id=$1 and status='searching'", [r.id, status]);
-      await q(`update jobs set status='done',finished_at=now(),result=$2 where id=$1`, [
-        job.id,
-        JSON.stringify({
-          providers: result.providers,
-          candidateIds,
-          books: result.books.length,
-          rejected,
-          leads: result.leads || [],
-        }),
-      ]);
+      await q(
+        `update jobs set status='done',finished_at=now(),result=$2,lease_until=null,lease_token=null where id=$1`,
+        [
+          job.id,
+          JSON.stringify({
+            providers: result.providers,
+            candidateIds,
+            books: result.books.length,
+            rejected,
+            leads: result.leads || [],
+          }),
+        ],
+      );
     });
   } catch (e) {
-    await sql(`update jobs set status='failed',finished_at=now(),result=$2 where id=$1`, [
-      job.id,
-      JSON.stringify({ error: (e as Error).message }),
-    ]);
-    await sql(`update requests set status='temporary_error' where id=$1 and status='searching'`, [
-      job.request_id,
-    ]);
+    await transaction(async (q) => {
+      const rows = await q(
+        `update jobs set status='failed',finished_at=now(),result=$2,lease_until=null,lease_token=null where id=$1 and lease_token=$3 returning id`,
+        [job.id, JSON.stringify({ error: (e as Error).message }), job.lease_token],
+      );
+      if (rows.length)
+        await q(`update requests set status='temporary_error' where id=$1 and status='searching'`, [
+          job.request_id,
+        ]);
+    });
   }
 }
 export async function startWorker() {
-  // One server instance; interrupted work gets one bounded recovery.
-  await sql(
-    `update jobs set status=case when attempts<2 then 'queued' else 'failed' end where status='running'`,
-  );
-  await sql(
-    `update requests set status='temporary_error' where status='searching' and not exists(select 1 from jobs where jobs.request_id=requests.id and jobs.status in ('running','queued'))`,
-  );
+  await recoverExpiredJobs();
   let busy = false;
   const timer = setInterval(async () => {
     if (busy) return;

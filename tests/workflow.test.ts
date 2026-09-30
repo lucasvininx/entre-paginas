@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import { hash } from 'bcryptjs';
 process.env.NODE_ENV = 'test';
 process.env.APP_ORIGIN = 'http://localhost:5173';
@@ -8,6 +8,8 @@ const schema = 'ep_test_' + Date.now();
 process.env.DB_SCHEMA = schema;
 const { sql, pool } = await import('../server/db.ts');
 const { providers, catalog } = await import('../server/providers.ts');
+const { webProvider } = await import('../server/web-discovery.ts');
+const { PostgresRateStore } = await import('../server/rate-limit.ts');
 const { demand, enqueue, runOne, startWorker } = await import('../server/workflow.ts');
 let server: any,
   base: string,
@@ -41,14 +43,11 @@ async function call(path: string, body?: unknown, cookie = readerCookie, method?
   };
 }
 before(async () => {
-  await pool.query(
-    (
-      await readFile(
-        new URL('../supabase/migrations/202609300001_initial.sql', import.meta.url),
-        'utf8',
-      )
-    ).replaceAll('entre_paginas', schema),
-  );
+  const folder = new URL('../supabase/migrations/', import.meta.url);
+  for (const file of (await readdir(folder)).filter((f) => f.endsWith('.sql')).sort())
+    await pool.query(
+      (await readFile(new URL(file, folder), 'utf8')).replaceAll('entre_paginas', schema),
+    );
   const password = await hash('Test-password-42', 12);
   for (const [name, role] of [
     ['Admin', 'admin'],
@@ -74,6 +73,7 @@ before(async () => {
   ).cookie;
   for (const key of Object.keys(providers)) delete providers[key];
   providers.Fixture = async () => [mockBook];
+  webProvider.search = async () => [];
 });
 after(async () => {
   if (server) await new Promise<void>((r) => server.close(r));
@@ -244,4 +244,37 @@ test('União preserva interessados únicos e histórico', async () => {
     (await sql('select count(*)::int n from attempts where request_id=$1', [b.id]))[0].n,
     1,
   );
+});
+
+test('Instâncias compartilham limite de chamadas no PostgreSQL', async () => {
+  const a = new PostgresRateStore('test-shared'),
+    b = new PostgresRateStore('test-shared');
+  const counts = await Promise.all([a.increment('client'), b.increment('client')]);
+  assert.deepEqual(counts.map((c) => c.totalHits).sort(), [1, 2]);
+  await sql("update rate_limits set reset_at=now()-interval '1 second' where key=$1", [
+    a.key('client'),
+  ]);
+  assert.equal((await b.increment('client')).totalHits, 1);
+});
+test('Worker não recupera nem duplica uma tarefa com lease ainda válido', async () => {
+  const r = await demand(readerId, 'Pedido lease', null, false);
+  await enqueue(r.id);
+  await sql(
+    `update jobs set status='running',attempts=1,lease_until=now()+interval '10 minutes',lease_token=gen_random_uuid() where request_id=$1`,
+    [r.id],
+  );
+  const timer = await startWorker();
+  clearInterval(timer);
+  await Promise.all([runOne(), runOne()]);
+  const [job] = await sql('select * from jobs where request_id=$1', [r.id]);
+  assert.equal(job.status, 'running');
+  assert.equal(job.attempts, 1);
+  await sql(`update jobs set lease_until=now()-interval '1 second' where id=$1`, [job.id]);
+  await Promise.all([runOne(), runOne()]);
+  const [done] = await sql('select * from jobs where id=$1', [job.id]);
+  assert.equal(done.status, 'done');
+  assert.equal(done.attempts, 2);
+});
+test('Cron rejeita invocações sem autenticação', async () => {
+  assert.equal((await call('/cron/worker', undefined, '')).status, 401);
 });

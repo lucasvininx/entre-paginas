@@ -1,7 +1,7 @@
 import { safeFetch } from './safe-fetch.ts';
 import { identity } from './normalize.ts';
 import { sql } from './db.ts';
-import { webDiscovery, type WebLead } from './web-discovery.ts';
+import { webProvider, type WebLead } from './web-discovery.ts';
 export type Candidate = {
   url: string;
   license: string;
@@ -245,7 +245,8 @@ export async function discover(
   leads?: WebLead[];
   providers: { name: string; ok: boolean; count: number; message?: string }[];
 }> {
-  const key = q.toLocaleLowerCase().trim();
+  const key =
+    'v2:' + q.toLocaleLowerCase().trim() + ':web=' + Boolean(process.env.BRAVE_SEARCH_KEY);
   if (!fresh) {
     const [cache] = await sql('select data from search_cache where key=$1 and expires_at>now()', [
       key,
@@ -281,9 +282,9 @@ export async function discover(
         };
       });
       let leads: WebLead[] = [];
-      if (process.env.BRAVE_SEARCH_KEY) {
+      {
         try {
-          leads = await webDiscovery(q);
+          leads = await webProvider.search(q);
           reports.push({ name: 'Busca web', ok: true, count: leads.length });
         } catch (e) {
           reports.push({ name: 'Busca web', ok: false, count: 0, message: (e as Error).message });

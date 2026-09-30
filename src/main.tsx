@@ -33,6 +33,9 @@ import './tablet.css';
 import { useVisualViewport } from './hooks/useVisualViewport';
 
 function App() {
+  const [webLeads, setWebLeads] = useState<{ title: string; url: string; description: string }[]>(
+    [],
+  );
   useVisualViewport();
   const [catalogPage, setCatalogPage] = useState(1),
     [moreCatalog, setMoreCatalog] = useState(true);
@@ -123,6 +126,7 @@ function App() {
       const r = await api('/search', { query: value });
       setBooks(r.books);
       setReports(r.providers);
+      setWebLeads(r.leads || []);
       if (r.message) notify(r.message);
     } catch (e) {
       fail(e);
@@ -634,6 +638,28 @@ function App() {
                       : 'Pesquise um título ou autor para começar. Os livros encontrados passam a fazer parte deste catálogo.'
                   }
                 />
+              )}
+              {page === 'discover' && webLeads.length > 0 && (
+                <section className="web-results" aria-label="Resultados da busca na web">
+                  <h3>Encontrados na web</h3>
+                  <p className="muted">
+                    Páginas relacionadas ao livro. Um link encontrado não confirma a disponibilidade
+                    de um PDF autorizado.
+                  </p>
+                  {webLeads.map((lead) => (
+                    <article className="source-card" key={lead.url}>
+                      <a
+                        className="official-link"
+                        href={safeUrl(lead.url)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {lead.title.replace(/<[^>]*>/g, '')} <ArrowUpRight size={15} />
+                      </a>
+                      <p>{lead.description.replace(/<[^>]*>/g, '')}</p>
+                    </article>
+                  ))}
+                </section>
               )}
               {filtered.length > 12 && (
                 <div className="pagination">

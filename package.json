@@ -13,8 +13,10 @@
   },
   "dependencies": {
     "@tailwindcss/vite": "latest",
+    "@vercel/functions": "^3.9.9",
     "@vitejs/plugin-react": "latest",
     "bcryptjs": "^3.0.0",
+    "cheerio": "^1.2.0",
     "concurrently": "^9.2.0",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.0.0",

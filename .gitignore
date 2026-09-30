@@ -6,3 +6,6 @@ dist/
 .local/
 supabase/.temp/
 coverage/
+.vercel/
+
+.vercel

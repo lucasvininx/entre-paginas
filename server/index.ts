@@ -2,18 +2,28 @@ import 'dotenv/config';
 import express from 'express';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
-import { rateLimit } from 'express-rate-limit';
+import { limiter } from './rate-limit.ts';
 import { hash, compare } from 'bcryptjs';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 import { z, ZodError } from 'zod';
 import { pool, sql, transaction } from './db.ts';
 import { catalog, discover, providers } from './providers.ts';
-import { demand, enqueue, approve, startWorker, validateSource } from './workflow.ts';
+import {
+  demand,
+  enqueue,
+  approve,
+  startWorker,
+  validateSource,
+  scheduleWorker,
+  runOne,
+} from './workflow.ts';
+import { streamDownload } from './stream-download.ts';
 import { normalize } from './normalize.ts';
 import { validatePdf } from './safe-fetch.ts';
 export const app = express();
 const production = process.env.NODE_ENV === 'production';
+if (process.env.VERCEL) app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use(
   helmet({
@@ -27,20 +37,36 @@ app.use(
 );
 app.use(express.json({ limit: '32kb' }));
 app.use(cookieParser());
-app.use(
-  '/api',
-  rateLimit({
-    windowMs: 60000,
-    limit: 180,
-    standardHeaders: 'draft-8',
-    legacyHeaders: false,
-  }),
-);
+app.use('/api', limiter('api', 60000, 180));
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'private, no-store');
+  next();
+});
+app.get('/api/cron/worker', async (req, res) => {
+  const actual = Buffer.from(req.get('authorization') || '');
+  const expected = Buffer.from('Bearer ' + (process.env.CRON_SECRET || ''));
+  if (
+    !process.env.CRON_SECRET ||
+    actual.length !== expected.length ||
+    !timingSafeEqual(actual, expected)
+  )
+    return void res.status(401).json({ error: 'Não autorizado' });
+  await runOne();
+  await sql('delete from rate_limits where reset_at<now()');
+  await sql('delete from sessions where expires_at<now()');
+  await sql('delete from search_cache where expires_at<now()');
+  res.json({ ok: true });
+});
 app.use('/api', (req, res, next) => {
   if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
     const origin = req.get('origin');
     const origins = production
-      ? [process.env.APP_ORIGIN]
+      ? [
+          process.env.APP_ORIGIN,
+          ...[process.env.VERCEL_PROJECT_PRODUCTION_URL, process.env.VERCEL_URL]
+            .filter(Boolean)
+            .map((host) => 'https://' + host),
+        ]
       : [process.env.APP_ORIGIN, 'http://localhost:5173', 'http://127.0.0.1:5173'];
     if (!origins.includes(origin))
       return res.status(403).json({ error: 'Origem da requisição não autorizada' });
@@ -78,7 +104,7 @@ app.get('/api/health', async (_req, res) => {
 });
 app.get('/api/me', (_req, res) => res.json({ user: res.locals.user || null }));
 const dummyHash = await hash(randomBytes(24).toString('hex'), 12);
-app.post('/api/login', rateLimit({ windowMs: 15 * 60000, limit: 12 }), async (req, res) => {
+app.post('/api/login', limiter('login', 15 * 60000, 12), async (req, res) => {
   const { email, password } = z
     .object({ email: z.email(), password: z.string().min(1).max(128) })
     .parse(req.body);
@@ -129,7 +155,7 @@ app.get('/api/books/:id', async (req, res) => {
   );
   res.json({ ...b, sources });
 });
-app.post('/api/search', auth, rateLimit({ windowMs: 60000, limit: 5 }), async (req, res) => {
+app.post('/api/search', auth, limiter('search', 60000, 5), async (req, res) => {
   const { query } = z.object({ query: querySchema }).parse(req.body);
   const result = await discover(query);
   const ids: string[] = [];
@@ -158,6 +184,7 @@ app.post('/api/search', auth, rateLimit({ windowMs: 60000, limit: 5 }), async (r
   res.json({
     books: local,
     providers: result.providers,
+    leads: result.leads || [],
     incomplete,
     request,
     message: request
@@ -222,7 +249,7 @@ app.put('/api/shelf/:id', auth, async (req, res) => {
   );
   res.json({ ok: true });
 });
-app.get('/api/download/:id', auth, rateLimit({ windowMs: 60000, limit: 6 }), async (req, res) => {
+app.get('/api/download/:id', auth, limiter('download', 60000, 6), async (req, res) => {
   const [s] = await sql(`select * from sources where id=$1 and status='approved'`, [
     uuid.parse(req.params.id),
   ]);
@@ -242,8 +269,12 @@ app.get('/api/download/:id', auth, rateLimit({ windowMs: 60000, limit: 6 }), asy
           .slice(0, 100) || 'livro'
       }.pdf"; filename*=UTF-8''${encodeURIComponent(s.title.slice(0, 100) + '.pdf')}`,
     );
-    res.send(pdf.body);
+    await streamDownload(res, pdf.body);
   } catch {
+    if (res.headersSent) {
+      if (!res.destroyed) res.destroy();
+      return;
+    }
     await transaction(async (q) => {
       await q(`update sources set status='rejected',validation=$2 where id=$1`, [
         s.id,
@@ -265,6 +296,7 @@ app.get('/api/download/:id', auth, rateLimit({ windowMs: 60000, limit: 6 }), asy
 });
 app.use('/api/admin', auth, admin);
 app.get('/api/admin/overview', async (_req, res) => {
+  scheduleWorker();
   const [counts] = await sql(
     `select (select count(*)::int from books) books,(select count(distinct book_id)::int from sources where status='approved') pdfs,(select count(*)::int from requests where status<>'available') pending,(select count(*)::int from jobs where status in ('running','queued')) jobs`,
   );
@@ -341,9 +373,11 @@ app.patch('/api/admin/requests/:id', async (req, res) => {
   );
   res.json({ ok: true });
 });
-app.post('/api/admin/requests/:id/search', async (req, res) =>
-  res.status(202).json(await enqueue(uuid.parse(req.params.id))),
-);
+app.post('/api/admin/requests/:id/search', async (req, res) => {
+  const job = await enqueue(uuid.parse(req.params.id));
+  scheduleWorker();
+  res.status(202).json(job);
+});
 app.post('/api/admin/requests/:id/merge', async (req, res) => {
   const from = uuid.parse(req.params.id),
     to = uuid.parse(req.body.targetId);
@@ -461,7 +495,7 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
             (production ? 'Tente novamente.' : err.message),
   });
 });
-if (process.env.NODE_ENV !== 'test') {
+if (process.env.NODE_ENV !== 'test' && !process.env.VERCEL) {
   await startWorker();
   const server = app.listen(Number(process.env.PORT || 3001), process.env.HOST || '127.0.0.1', () =>
     console.log('Entre Páginas API: http://localhost:3001'),

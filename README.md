@@ -4,6 +4,10 @@ Biblioteca pessoal em português: busca federada, catálogo crescente, estante, 
 
 ## Projeto criado
 
+- Aplicação publicada: **https://entre-paginas-wheat.vercel.app**. Instruções de publicação e chaves em [docs/DEPLOY.md](docs/DEPLOY.md).
+- A conta da Analima está criada: `analima@entre-paginas.local`. A senha gerada está em `.local/analima-access.json`, fora do Git e do deploy.
+- “Sweethand”, de N. G. Peltier, está no catálogo e nas solicitações com prioridade alta. Nenhum PDF completo autorizado foi localizado; o cadastro não significa disponibilidade para download.
+
 - Supabase: [entre-paginas](https://supabase.com/dashboard/project/nysmbvjjqbzzbjuuxeei), região São Paulo (`sa-east-1`).
 - PostgreSQL com schema privado `entre_paginas`. A migration já foi aplicada neste ambiente.
 - Frontend React + TypeScript + Vite + Tailwind; backend Express + TypeScript; consultas SQL parametrizadas com `pg`. PostgreSQL substitui SQLite/Prisma para usar o Supabase solicitado.
@@ -71,7 +75,7 @@ Documentação consultada:
 2. Uma correspondência exata sem PDF gera uma solicitação vinculada. Consultas ambíguas/sem identificação preservam a consulta original com os campos desconhecidos vazios. É possível selecionar um resultado ou preencher os dados na opção “Solicitar um livro”.
 3. Pedidos iguais usam restrições únicas e upserts; repetir a solicitação não aumenta a contagem do mesmo leitor.
 4. Administração reúne interessados, prioridade, status, datas, observações, tentativas e candidatos. “Buscar agora” cria uma tarefa persistente executada pelo worker.
-5. O worker consulta as fontes, registra falhas e rejeições, valida até oito candidatos e encaminha a revisão. Títulos/idiomas diferentes ficam registrados como correspondência incerta, sem publicação.
+5. O worker consulta as fontes, registra falhas e rejeições, valida até três candidatos dentro do orçamento de execução e encaminha a revisão. Títulos/idiomas diferentes ficam registrados como correspondência incerta, sem publicação.
 6. O administrador inspeciona o arquivo completo, autoria, edição, idioma e autorização regional. Apenas confirmar a revisão e passar na revalidação técnica permite publicar.
 7. A aprovação atualiza solicitações e avisos dos interessados na mesma transação. Não há envio de e-mails.
 8. O download recebe ID de uma fonte aprovada, revalida e entrega o PDF com nome correto. Uma falha retira aquela fonte da disponibilidade, mantendo outras fontes aprovadas.
@@ -86,8 +90,8 @@ Busca incompleta é diferente de ausência definitiva. Fontes com falha não apa
 - PDFs são baixados sob demanda e ficam somente em memória durante a operação; não são importados acervos inteiros. O limite do arquivo é proposital e pode excluir livros grandes.
 - O contador representa **downloads iniciados**, não conclusão no navegador.
 - Cache persistente por 15 minutos, até três buscas federadas em paralelo e intervalo mínimo entre chamadas de cada provedor. Há limites adicionais por IP nos endpoints.
-- Worker de uma instância, uma tarefa de cada vez, unicidade de tarefa ativa e recuperação limitada de tarefas interrompidas. Uma tentativa sem resultado pode ser repetida manualmente, sem repetição automática infinita.
-- Dados persistem no Supabase. Não há dependência de disco local persistente para o banco. Para hospedar, basta manter uma instância Node em execução e configurar backups do projeto conforme a necessidade.
+- Worker com uma tarefa de cada vez, bloqueio no PostgreSQL entre instâncias, lease de dez minutos e recuperação limitada de tarefas interrompidas. Uma tentativa sem resultado pode ser repetida manualmente, sem repetição automática infinita.
+- Dados, sessões e limites por IP persistem no Supabase. Na Vercel, `waitUntil` executa as tarefas após a resposta; a abertura da administração e o cron diário retomam a fila. Não há dependência de disco local persistente para o banco.
 
 ## Produção
 
@@ -99,9 +103,11 @@ $env:HOST = '0.0.0.0'
 npm start
 ```
 
-O Express serve `dist` e `/api` na porta `PORT` (3001 por padrão). Use HTTPS no proxy/host; cookies `Secure` são ativados em produção. Não execute múltiplas instâncias do worker desta versão. Ajuste explicitamente `trust proxy` se implantar atrás de proxy para que o limite por IP corresponda ao leitor; não confie indiscriminadamente em cabeçalhos encaminhados.
+O comando acima é a alternativa de servidor Node persistente. O Express serve `dist` e `/api` na porta `PORT` (3001 por padrão). Use HTTPS no proxy/host; cookies `Secure` são ativados em produção. Na Vercel, `api/index.ts` exporta o aplicativo sem iniciar listener ou timer permanente, com proxy configurado para a plataforma. Veja [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ## Verificações
+
+Os 17 testes passaram. Em produção, foram conferidos por HTTP: página inicial, saúde do banco, login das duas contas, cookies Secure/HttpOnly, solicitação de Sweethand, bloqueio administrativo para Analima, cron sem credencial bloqueado e download do PDF autorizado de 3.840.141 bytes. Evidência local: `.local/online-smoke.json`. Isso não substitui revisão visual no Safari/iPad.
 
 ```powershell
 npm test
@@ -123,7 +129,7 @@ Os ajustes específicos de tablet/iPad, incluindo retrato, paisagem, toque, tecl
 - Uma obra Open Library não equivale a uma edição: não atribuímos a ela arbitrariamente o primeiro idioma/ISBN de uma lista de edições.
 - A deduplicação é conservadora: ISBN, idioma e edição; na ausência de ISBN, título/autor/idioma/edição conhecidos. Casos incompletos preservam a identidade da fonte e podem exigir revisão.
 - Alguns pedidos podem não ter PDF autorizado, especialmente edições comerciais contemporâneas. Continuam no catálogo e na fila.
-- Chaves opcionais Brave/OpenAlex não foram fornecidas; essas integrações estão implementadas, mas não foram validadas com credenciais reais.
+- Brave configurado e validado em produção: a consulta “Sweethand” retornou 20 pistas web. OpenAlex permanece sem credencial e não foi validado com chave real.
 - Conta pessoal: sem recuperação de senha por e-mail, sem envio de mensagens, sem OCR e sem varredura de acervos inteiros. Criação de leitores é exclusiva do administrador.
 
 ## Estrutura
