@@ -1,0 +1,58 @@
+export type User = {
+  id: string;
+  name: string;
+  email: string;
+  role: 'admin' | 'reader';
+};
+export type Book = {
+  id: string;
+  title: string;
+  authors: string;
+  isbn?: string;
+  language?: string;
+  edition?: string;
+  category?: string;
+  description?: string;
+  cover?: string;
+  origin: string;
+  official_url?: string;
+  available: boolean;
+  favorite?: boolean;
+  state?: 'want' | 'reading' | 'read';
+  sources?: Source[];
+};
+export type Source = {
+  id: string;
+  title: string;
+  authors: string;
+  origin: string;
+  url: string;
+  evidence_url: string;
+  license: string;
+  region: string;
+  language: string;
+  edition: string;
+  status: string;
+  validation?: { ok: boolean; message: string };
+};
+export type RequestRow = {
+  id: string;
+  query: string;
+  title: string | null;
+  author: string | null;
+  isbn: string | null;
+  language: string | null;
+  edition: string | null;
+  status: string;
+  priority: number;
+  notes: string;
+  interested: number;
+  last_at: string;
+  book_id: string | null;
+};
+export type Provider = {
+  name: string;
+  ok: boolean;
+  count: number;
+  message?: string;
+};

@@ -1,0 +1,22 @@
+create schema if not exists entre_paginas;
+set search_path to entre_paginas;
+create table if not exists users(id uuid primary key default gen_random_uuid(), name text not null, email text unique not null, password_hash text not null, role text not null check(role in ('admin','reader')), created_at timestamptz default now());
+create table if not exists sessions(id text primary key, user_id uuid references users on delete cascade, expires_at timestamptz not null);
+create table if not exists books(id uuid primary key default gen_random_uuid(), identity text unique not null, title text not null, authors text not null default '', isbn text, language text, edition text, category text, description text, cover text, origin text not null, official_url text, created_at timestamptz default now());
+create table if not exists requests(id uuid primary key default gen_random_uuid(), identity text unique not null, book_id uuid references books, query text not null, normalized_query text not null, title text, author text, isbn text, language text, edition text, reason text not null, status text not null default 'pending', priority int not null default 0, notes text not null default '', first_at timestamptz default now(), last_at timestamptz default now());
+create table if not exists interests(request_id uuid references requests on delete cascade, user_id uuid references users on delete cascade, created_at timestamptz default now(), primary key(request_id,user_id));
+create table if not exists sources(id uuid primary key default gen_random_uuid(), book_id uuid references books, request_id uuid references requests, url text not null, origin text not null, evidence_url text not null, license text not null, region text not null default 'BR', title text not null, authors text not null, language text, edition text, status text not null default 'candidate', validation jsonb, approved_by uuid references users, validated_at timestamptz, downloads_started int not null default 0, unique(book_id,url));
+create table if not exists jobs(id uuid primary key default gen_random_uuid(), request_id uuid references requests, status text not null default 'queued', attempts int not null default 0, created_at timestamptz default now(), started_at timestamptz, finished_at timestamptz, result jsonb);
+create unique index if not exists jobs_one_active on jobs(request_id) where status in ('queued','running');
+create table if not exists attempts(id uuid primary key default gen_random_uuid(), request_id uuid references requests, query text not null, providers jsonb not null, created_at timestamptz default now());
+create table if not exists shelves(user_id uuid references users on delete cascade, book_id uuid references books on delete cascade, favorite boolean default false, state text default 'want' check(state in ('want','reading','read')), primary key(user_id,book_id));
+create table if not exists notifications(id uuid primary key default gen_random_uuid(), user_id uuid references users on delete cascade, request_id uuid references requests, message text not null, created_at timestamptz default now(), read_at timestamptz);
+create table if not exists search_cache(key text primary key, data jsonb not null, expires_at timestamptz not null);
+create index if not exists requests_status on requests(status, priority desc,last_at desc);
+create index if not exists books_title on books(lower(title));
+create index if not exists interests_user on interests(user_id);
+create index if not exists jobs_queue on jobs(status,created_at);
+create index if not exists attempts_request on attempts(request_id,created_at desc);
+-- Private backend-only schema. It is deliberately not exposed through the Data API.
+revoke all on schema entre_paginas from anon, authenticated;
+do $$ declare t record; begin for t in select tablename from pg_tables where schemaname='entre_paginas' loop execute format('alter table entre_paginas.%I enable row level security',t.tablename); end loop; end $$;
